@@ -255,4 +255,81 @@ class ActionRouterTest {
         assertEquals("error", json.getString("status"))
         assertTrue("code present", json.has("code"))
     }
+
+    // ── Auth applies to *every* non-/ping request shape ─────────
+
+    /**
+     * The auth gate keys on path, before dispatch, so an unknown route
+     * must answer 401 rather than 404 to an unauthenticated caller. On
+     * a LAN-exposed listener the 404-vs-401 difference is a free route
+     * oracle: it would let any peer enumerate which endpoints exist
+     * without holding the token.
+     */
+    @Test
+    fun unknownRoutesRequireAuthBeforeTheyReport404() {
+        val probes = listOf(
+            "GET" to "/no-such-endpoint",
+            "POST" to "/admin",
+            "DELETE" to "/screenshot",
+            "PUT" to "/tap",
+            "GET" to "/",
+            "GET" to "/PING",          // case-sensitive: not the /ping bypass
+            "GET" to "/ping/../tap",   // no path normalisation, so no bypass
+            "GET" to "/ping2",
+        )
+        for ((method, path) in probes) {
+            val resp = router.route(method, path, emptyMap(), unauthed())
+            assertEquals("$method $path must be 401, not a route oracle", 401, resp.statusCode)
+        }
+    }
+
+    /**
+     * HEAD and OPTIONS are not dispatched by name anywhere, so they must
+     * not become an unauthenticated side door into the protected routes.
+     */
+    @Test
+    fun headAndOptionsOnProtectedRoutesStillRequireAuth() {
+        for (method in listOf("HEAD", "OPTIONS", "TRACE", "PATCH")) {
+            for (path in listOf("/screenshot", "/a11y_tree_full", "/tap", "/keyboard/input")) {
+                val resp = router.route(method, path, emptyMap(), unauthed())
+                assertEquals("$method $path must be 401", 401, resp.statusCode)
+            }
+        }
+    }
+
+    /**
+     * `/ping` is exempted by path, so non-GET verbs on it also skip the
+     * auth check. That is intentional and harmless — they all fall
+     * through to a 404 whose body carries nothing an unauthenticated
+     * peer could not already learn. Pinned so the exemption cannot
+     * quietly grow a real handler behind it.
+     */
+    @Test
+    fun nonGetVerbsOnPingAreUnauthenticatedButInert() {
+        for (method in listOf("HEAD", "OPTIONS", "POST", "DELETE")) {
+            val resp = router.route(method, "/ping", emptyMap(), unauthed())
+            assertEquals("$method /ping", 404, resp.statusCode)
+            assertFalse("must not leak the token", resp.body.contains(token))
+            assertEquals("unknown_endpoint", JSONObject(resp.body).getString("code"))
+        }
+    }
+
+    @Test
+    fun bearerComparisonRejectsPrefixesAndSuffixes() {
+        // Guards the constant-time comparison against a length-oblivious
+        // rewrite: a token prefix must never authenticate.
+        val nearMisses = listOf(
+            token.dropLast(1),
+            token + "x",
+            "",
+            token.uppercase(),
+        )
+        for (candidate in nearMisses) {
+            val resp = router.route(
+                "GET", "/screenshot", emptyMap(),
+                mapOf("authorization" to "Bearer $candidate"),
+            )
+            assertEquals("'$candidate' must not authenticate", 401, resp.statusCode)
+        }
+    }
 }

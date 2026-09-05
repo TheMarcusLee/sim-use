@@ -117,16 +117,14 @@ class SimuseContentProvider : ContentProvider() {
      */
     private fun statusJson(): JSONObject {
         val service = SimuseAccessibilityService.instance
-        return JSONObject().apply {
-            // What is persisted…
-            put("bind_all", settings.bindAllInterfaces)
-            // …versus what the live listener is actually bound to.
-            put("bound_all", service?.boundAllInterfaces ?: false)
-            put("server_running", service?.isServerRunning ?: false)
-            put("accessibility_service_connected", service != null)
-            put("port", SimuseAccessibilityService.SERVER_PORT)
-            put("lan_ipv4", NetworkAddresses.lanIpv4() ?: JSONObject.NULL)
-        }
+        return buildStatusJson(
+            bindAll = settings.bindAllInterfaces,
+            boundAll = service?.boundAllInterfaces ?: false,
+            serverRunning = service?.isServerRunning ?: false,
+            accessibilityServiceConnected = service != null,
+            port = SimuseAccessibilityService.SERVER_PORT,
+            lanIpv4 = NetworkAddresses.lanIpv4(),
+        )
     }
 
     private fun successBundle(result: Any?): Bundle = Bundle().apply {
@@ -187,5 +185,30 @@ class SimuseContentProvider : ContentProvider() {
         internal const val METHOD_SET_BIND_ALL = "set_bind_all"
         internal const val METHOD_GET_BIND_ALL = "get_bind_all"
         internal const val METHOD_STATUS = "status"
+
+        /**
+         * Pure builder for the operator status payload. Split out from
+         * the instance method so a JVM test can assert the exact field
+         * set — in particular that no auth material ever creeps in.
+         * The bearer token is handed out by exactly one path, the
+         * `auth_token` query, and must stay that way.
+         */
+        internal fun buildStatusJson(
+            bindAll: Boolean,
+            boundAll: Boolean,
+            serverRunning: Boolean,
+            accessibilityServiceConnected: Boolean,
+            port: Int,
+            lanIpv4: String?,
+        ): JSONObject = JSONObject().apply {
+            // What is persisted…
+            put("bind_all", bindAll)
+            // …versus what the live listener is actually bound to.
+            put("bound_all", boundAll)
+            put("server_running", serverRunning)
+            put("accessibility_service_connected", accessibilityServiceConnected)
+            put("port", port)
+            put("lan_ipv4", lanIpv4 ?: JSONObject.NULL)
+        }
     }
 }

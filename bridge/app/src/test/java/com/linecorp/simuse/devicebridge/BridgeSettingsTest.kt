@@ -119,4 +119,40 @@ class BridgeSettingsTest {
         // bind mode together, restoring upstream behaviour wholesale.
         assertEquals("sim_use_device_bridge", name.captured)
     }
+
+    /**
+     * Full toggle round trip against a stateful store, which the
+     * write-only and read-only tests above cannot catch between them: an
+     * operator's `set_bind_all true` must be readable as true by the
+     * very next `get_bind_all` / listener start, and `false` must take
+     * the device back to upstream loopback rather than sticking on.
+     *
+     * This is the exact sequence FARM-NOTES documents for putting a
+     * phone on, and later off, the farm network.
+     */
+    @Test
+    fun bindAllTogglesRoundTripThroughTheStore() {
+        val f = Fixture()
+        val stored = HashMap<String, Boolean>()
+        every { f.editor.putBoolean(any(), any()) } answers {
+            stored[firstArg()] = secondArg()
+            f.editor
+        }
+        every { f.prefs.getBoolean(any(), any()) } answers {
+            stored[firstArg<String>()] ?: secondArg()
+        }
+
+        val settings = BridgeSettings(f.context)
+        assertFalse("fresh install is loopback", settings.bindAllInterfaces)
+
+        settings.bindAllInterfaces = true
+        assertTrue("set_bind_all true must be visible immediately", settings.bindAllInterfaces)
+        // A second BridgeSettings over the same store — what the
+        // accessibility service constructs on restart — sees it too.
+        assertTrue(BridgeSettings(f.context).bindAllInterfaces)
+
+        settings.bindAllInterfaces = false
+        assertFalse("set_bind_all false must return the device to loopback", settings.bindAllInterfaces)
+        assertFalse(BridgeSettings(f.context).bindAllInterfaces)
+    }
 }

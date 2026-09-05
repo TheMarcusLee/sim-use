@@ -329,6 +329,13 @@ class HttpServer(
                 val n = input.read(buf, read, contentLength - read)
                 if (n == -1) break
                 read += n
+                // Check again *after* the read: a single `read()` that
+                // blocks for most of `SOCKET_TIMEOUT_MS` and then
+                // satisfies the whole request would otherwise slip past
+                // a deadline that was still live when it started.
+                if (System.nanoTime() > deadline) {
+                    throw BadRequestException(408, "request_timeout", "body read exceeded deadline")
+                }
             }
             // A body shorter than its Content-Length used to be parsed
             // as if it were complete, which turns a dropped connection
@@ -436,7 +443,7 @@ class HttpServer(
     // ── HTTP response writer ────────────────────────────────────
 
     private fun writeResponse(socket: Socket, response: HttpResponse) {
-        val statusText = HTTP_STATUS_TEXTS[response.statusCode] ?: "Unknown"
+        val statusText = statusText(response.statusCode)
         val bodyBytes = response.body.toByteArray(Charsets.UTF_8)
 
         val header = buildString {
@@ -518,7 +525,15 @@ class HttpServer(
             return result
         }
 
-        private val HTTP_STATUS_TEXTS = mapOf(
+        /**
+         * Reason phrase for a status line. Every code any code path in
+         * this app can emit must have an entry — a missing one used to
+         * silently produce `HTTP/1.1 413 Unknown`, which some clients
+         * log as a protocol error.
+         */
+        internal fun statusText(code: Int): String = HTTP_STATUS_TEXTS[code] ?: "Unknown"
+
+        internal val HTTP_STATUS_TEXTS = mapOf(
             200 to "OK",
             400 to "Bad Request",
             401 to "Unauthorized",

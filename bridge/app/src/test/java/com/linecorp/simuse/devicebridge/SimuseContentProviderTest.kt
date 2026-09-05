@@ -9,7 +9,10 @@ import io.mockk.mockk
 import io.mockk.mockkStatic
 import io.mockk.unmockkAll
 import org.junit.After
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Test
@@ -107,5 +110,71 @@ class SimuseContentProviderTest {
             // See note above.
         }
         assertNotNull("smoke") // dummy assert so JUnit counts this as a real test
+    }
+
+    // ── Operator status payload (fork addition) ─────────────────
+
+    /**
+     * `status` is the one call that returns a broad snapshot of the
+     * bridge, and operators paste its output into tickets and chat. It
+     * must never carry auth material — the bearer token has exactly one
+     * exit, the `auth_token` query.
+     */
+    @Test
+    fun statusJsonCarriesNoAuthMaterial() {
+        val json = SimuseContentProvider.buildStatusJson(
+            bindAll = true,
+            boundAll = true,
+            serverRunning = true,
+            accessibilityServiceConnected = true,
+            port = 8080,
+            lanIpv4 = "192.168.1.42",
+        )
+        val keys = json.keys().asSequence().toSet()
+        assertEquals(
+            setOf(
+                "bind_all", "bound_all", "server_running",
+                "accessibility_service_connected", "port", "lan_ipv4",
+            ),
+            keys,
+        )
+        val body = json.toString().lowercase()
+        for (forbidden in listOf("token", "bearer", "authorization", "secret", "auth_token")) {
+            assertFalse("status must not mention '$forbidden': $json", body.contains(forbidden))
+        }
+    }
+
+    /**
+     * Round-trips the persisted-vs-live distinction the farm relies on:
+     * between a `set_bind_all true` and a successful rebind, `bind_all`
+     * is true while `bound_all` is still false, and that difference is
+     * exactly what tells an operator the toggle has not taken effect.
+     */
+    @Test
+    fun statusJsonSeparatesPersistedIntentFromLiveBindMode() {
+        val pending = SimuseContentProvider.buildStatusJson(
+            bindAll = true,
+            boundAll = false,
+            serverRunning = false,
+            accessibilityServiceConnected = false,
+            port = 8080,
+            lanIpv4 = null,
+        )
+        assertTrue(pending.getBoolean("bind_all"))
+        assertFalse(pending.getBoolean("bound_all"))
+        assertFalse(pending.getBoolean("server_running"))
+        assertTrue("absent IP must be JSON null", pending.isNull("lan_ipv4"))
+
+        val live = SimuseContentProvider.buildStatusJson(
+            bindAll = true,
+            boundAll = true,
+            serverRunning = true,
+            accessibilityServiceConnected = true,
+            port = 8080,
+            lanIpv4 = "10.0.0.5",
+        )
+        assertTrue(live.getBoolean("bound_all"))
+        assertEquals("10.0.0.5", live.getString("lan_ipv4"))
+        assertEquals(8080, live.getInt("port"))
     }
 }
