@@ -6,8 +6,10 @@ import android.content.Intent
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import com.linecorp.simuse.devicebridge.config.AuthManager
+import com.linecorp.simuse.devicebridge.config.BridgeSettings
 import com.linecorp.simuse.devicebridge.server.ActionRouter
 import com.linecorp.simuse.devicebridge.server.HttpServer
+import com.linecorp.simuse.devicebridge.util.NetworkAddresses
 
 /**
  * sim-use bridge accessibility service.
@@ -69,13 +71,41 @@ class SimuseAccessibilityService : AccessibilityService() {
     fun startServer() {
         if (httpServer?.isRunning == true) return
         val authManager = AuthManager(this)
+        val settings = BridgeSettings(this)
+        // Snapshot the flag at bind time: the listener's bind address is
+        // fixed for the life of the ServerSocket, so a mid-flight
+        // preference change must go through `restartServer()` (which the
+        // ContentProvider calls) rather than being re-read per request.
+        val bindAll = settings.bindAllInterfaces
+        boundAllInterfaces = bindAll
         val newRouter = ActionRouter(
             serviceProvider = { instance },
             authManager = authManager,
+            bindAllProvider = { boundAllInterfaces },
         )
         router = newRouter
-        httpServer = HttpServer(SERVER_PORT, newRouter).also { it.start() }
-        Log.i(TAG, "HTTP server started on port $SERVER_PORT")
+        httpServer = HttpServer(SERVER_PORT, newRouter, bindAll = bindAll).also { it.start() }
+        if (bindAll) {
+            Log.i(
+                TAG,
+                "HTTP server started on 0.0.0.0:$SERVER_PORT — point the farm at " +
+                    "http://${NetworkAddresses.lanIpv4() ?: "<no-lan-ipv4>"}:$SERVER_PORT",
+            )
+        } else {
+            Log.i(TAG, "HTTP server started on 127.0.0.1:$SERVER_PORT")
+        }
+    }
+
+    /**
+     * Stops and re-starts the listener so a changed bind mode takes
+     * effect immediately. Called from the ContentProvider after
+     * `set_bind_all`; a no-op start when the service is not connected
+     * is fine because `onServiceConnected` will start with the newly
+     * persisted flag anyway.
+     */
+    fun restartServer() {
+        stopServer()
+        startServer()
     }
 
     fun stopServer() {
@@ -92,6 +122,15 @@ class SimuseAccessibilityService : AccessibilityService() {
     }
 
     val isServerRunning: Boolean get() = httpServer?.isRunning == true
+
+    /**
+     * Bind mode of the *currently running* listener, which can lag the
+     * persisted preference between a `set_bind_all` write and the
+     * restart. Reported on `/ping` so the farm sees reality, not intent.
+     */
+    @Volatile
+    var boundAllInterfaces: Boolean = false
+        private set
 
     private fun startKeepAliveService() {
         try {

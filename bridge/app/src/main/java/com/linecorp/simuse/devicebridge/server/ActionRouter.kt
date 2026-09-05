@@ -37,7 +37,8 @@ import java.util.concurrent.atomic.AtomicInteger
  *     object, array), NOT a JSON-encoded string. csat double-encodes;
  *     we don't. (Kickoff gotcha #1.)
  *  2. **`/ping` carries `protocol_version` + `bridge_version`** as
- *     envelope siblings of `status` / `result`. csat's `/ping` returns
+ *     envelope siblings of `status` / `result`, plus this fork's
+ *     `bind_all` (loopback vs 0.0.0.0). csat's `/ping` returns
  *     only `"pong"`.
  *  3. **`/keyboard/key` rejects unsupported keycodes** with a 400 and
  *     structured error pointing at `/keyboard/input`. csat broadcasts
@@ -46,6 +47,15 @@ import java.util.concurrent.atomic.AtomicInteger
 class ActionRouter(
     private val serviceProvider: () -> AccessibilityService?,
     private val authManager: AuthManager,
+    /**
+     * Reports whether the HTTP listener is currently bound to all
+     * interfaces. Surfaced on the unauthenticated `/ping` so a farm
+     * controller can confirm a device is actually reachable over the
+     * LAN (and notice a device that silently fell back to loopback)
+     * without holding the bearer token. Defaults to `false` so
+     * existing call sites and tests keep upstream behaviour.
+     */
+    private val bindAllProvider: () -> Boolean = { false },
 ) {
     private val treeHandler = TreeHandler()
     private val captureHandler = CaptureHandler()
@@ -110,6 +120,11 @@ class ActionRouter(
             put("result", "pong")
             put("protocol_version", BuildConfig.PROTOCOL_VERSION)
             put("bridge_version", BuildConfig.VERSION_NAME)
+            // Fork addition. Purely descriptive: no token, no auth
+            // material, nothing an unauthenticated LAN peer could not
+            // already infer from the fact that this reply arrived over
+            // the LAN at all.
+            put("bind_all", bindAllProvider())
         }
         return HttpResponse(200, payload.toString())
     }

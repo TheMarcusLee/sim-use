@@ -7,8 +7,11 @@ import android.database.Cursor
 import android.database.MatrixCursor
 import android.net.Uri
 import android.os.Binder
+import android.os.Bundle
 import android.os.Process
 import com.linecorp.simuse.devicebridge.config.AuthManager
+import com.linecorp.simuse.devicebridge.config.BridgeSettings
+import com.linecorp.simuse.devicebridge.util.NetworkAddresses
 import org.json.JSONObject
 
 /**
@@ -19,6 +22,21 @@ import org.json.JSONObject
  * URIs:
  *   - `content://com.linecorp.simuse.devicebridge/auth_token`         query
  *   - `content://com.linecorp.simuse.devicebridge/toggle_socket_server` insert with `enabled:b:true|false`
+ *   - `content://com.linecorp.simuse.devicebridge/bridge_status`      query (fork addition)
+ *
+ * `call` methods (fork addition — `adb shell content call --uri
+ * content://com.linecorp.simuse.devicebridge --method <m> [--arg <v>]`):
+ *   - `set_bind_all` with `--arg true|false` — persist the LAN-listen
+ *     flag and restart the listener so it takes effect at once.
+ *   - `get_bind_all` — read the persisted flag back.
+ *   - `status` — persisted flag, live bind mode, port and LAN IPv4, so
+ *     one adb round-trip over USB tells the operator the exact
+ *     `http://<ip>:<port>` to configure.
+ *
+ * `call` is used rather than another `insert` URI because `content
+ * call` prints the returned Bundle to stdout, which is what makes a
+ * one-shot USB bootstrap script readable; `content insert` returns
+ * nothing.
  *
  * Same shape and same query-cursor encoding as csat's
  * `CsatContentProvider`. The returned token row format
@@ -34,6 +52,7 @@ import org.json.JSONObject
 class SimuseContentProvider : ContentProvider() {
 
     private val authManager by lazy { AuthManager(context!!) }
+    private val settings by lazy { BridgeSettings(context!!) }
 
     override fun onCreate(): Boolean = true
 
@@ -45,15 +64,90 @@ class SimuseContentProvider : ContentProvider() {
         sortOrder: String?,
     ): Cursor? {
         assertShellCaller()
-        if (uri.lastPathSegment != PATH_AUTH_TOKEN) return null
-        val token = authManager.getOrCreateToken()
-        val json = JSONObject().apply {
-            put("status", "success")
-            put("result", token)
+        val json = when (uri.lastPathSegment) {
+            PATH_AUTH_TOKEN -> JSONObject().apply {
+                put("status", "success")
+                put("result", authManager.getOrCreateToken())
+            }
+            // Same cursor encoding as auth_token so the existing Swift
+            // `AuthTokenFetcher`-style parser shape is reusable.
+            PATH_BRIDGE_STATUS -> JSONObject().apply {
+                put("status", "success")
+                put("result", statusJson())
+            }
+            else -> return null
         }.toString()
         return MatrixCursor(arrayOf(COLUMN_RESULT)).apply {
             addRow(arrayOf(json))
         }
+    }
+
+    /**
+     * Handles `adb shell content call`. Every branch is behind the same
+     * shell/root UID guard as `query`/`insert` — an installed app must
+     * not be able to flip the bridge onto the LAN.
+     */
+    override fun call(method: String, arg: String?, extras: Bundle?): Bundle? {
+        assertShellCaller()
+        return when (method) {
+            METHOD_SET_BIND_ALL -> {
+                val parsed = BridgeSettings.parseBooleanArg(arg)
+                    ?: return errorBundle(
+                        "invalid_arg",
+                        "expected --arg true|false, got: ${arg ?: "<missing>"}",
+                    )
+                settings.bindAllInterfaces = parsed
+                // Rebind now rather than waiting for the next a11y
+                // service connect, so the operator's very next request
+                // over Wi-Fi succeeds. Null instance = service not
+                // enabled yet; the flag is persisted and will be picked
+                // up by `onServiceConnected`.
+                SimuseAccessibilityService.instance?.restartServer()
+                successBundle(statusJson())
+            }
+            METHOD_GET_BIND_ALL -> successBundle(settings.bindAllInterfaces)
+            METHOD_STATUS -> successBundle(statusJson())
+            else -> errorBundle("unknown_method", method)
+        }
+    }
+
+    /**
+     * Descriptive snapshot for operators. Carries no auth material —
+     * the token is only ever handed out through the `auth_token` query.
+     */
+    private fun statusJson(): JSONObject {
+        val service = SimuseAccessibilityService.instance
+        return JSONObject().apply {
+            // What is persisted…
+            put("bind_all", settings.bindAllInterfaces)
+            // …versus what the live listener is actually bound to.
+            put("bound_all", service?.boundAllInterfaces ?: false)
+            put("server_running", service?.isServerRunning ?: false)
+            put("accessibility_service_connected", service != null)
+            put("port", SimuseAccessibilityService.SERVER_PORT)
+            put("lan_ipv4", NetworkAddresses.lanIpv4() ?: JSONObject.NULL)
+        }
+    }
+
+    private fun successBundle(result: Any?): Bundle = Bundle().apply {
+        putString(
+            COLUMN_RESULT,
+            JSONObject().apply {
+                put("status", "success")
+                put("result", result)
+            }.toString(),
+        )
+    }
+
+    private fun errorBundle(code: String, message: String): Bundle = Bundle().apply {
+        putString(
+            COLUMN_RESULT,
+            JSONObject().apply {
+                put("status", "error")
+                put("code", code)
+                put("error", message)
+            }.toString(),
+        )
     }
 
     override fun insert(uri: Uri, values: ContentValues?): Uri? {
@@ -87,6 +181,11 @@ class SimuseContentProvider : ContentProvider() {
     companion object {
         private const val PATH_AUTH_TOKEN = "auth_token"
         private const val PATH_TOGGLE_SERVER = "toggle_socket_server"
+        private const val PATH_BRIDGE_STATUS = "bridge_status"
         private const val COLUMN_RESULT = "result"
+
+        internal const val METHOD_SET_BIND_ALL = "set_bind_all"
+        internal const val METHOD_GET_BIND_ALL = "get_bind_all"
+        internal const val METHOD_STATUS = "status"
     }
 }

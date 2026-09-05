@@ -2,6 +2,7 @@
 package com.linecorp.simuse.devicebridge.server
 
 import android.util.Log
+import com.linecorp.simuse.devicebridge.util.NetworkAddresses
 import java.io.BufferedInputStream
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
@@ -35,6 +36,14 @@ import java.util.concurrent.atomic.AtomicInteger
 class HttpServer(
     private val port: Int,
     private val router: ActionRouter,
+    /**
+     * When true the accept socket binds `0.0.0.0` instead of
+     * `127.0.0.1`, making the bridge reachable from the LAN. Fork
+     * addition for cable-free phone farms; defaults to false so
+     * upstream `adb forward` deployments are byte-for-byte unchanged.
+     * See `BridgeSettings.bindAllInterfaces`.
+     */
+    private val bindAll: Boolean = false,
 ) {
     private var serverSocket: ServerSocket? = null
     private val running = AtomicBoolean(false)
@@ -55,14 +64,34 @@ class HttpServer(
             try {
                 val ss = ServerSocket()
                 ss.reuseAddress = true
-                // Bind to loopback only. `adb forward tcp:LOCAL tcp:REMOTE`
+                // Default: loopback only. `adb forward tcp:LOCAL tcp:REMOTE`
                 // reaches us through 127.0.0.1, so wildcard binding only
                 // adds an attack surface: a Wi-Fi-connected device would
                 // otherwise expose the bridge to any LAN peer that knows
                 // the auth token.
-                ss.bind(InetSocketAddress(InetAddress.getByName("127.0.0.1"), port))
+                //
+                // `bindAll` opts into exactly that exposure, for phone
+                // farms where there is no cable to forward over. Bearer
+                // auth stays mandatory on every route except `/ping`
+                // (see ActionRouter.route), so the token remains the
+                // only credential — put the devices on a trusted VLAN.
+                val host = if (bindAll) BIND_ALL_HOST else BIND_LOOPBACK_HOST
+                ss.bind(InetSocketAddress(InetAddress.getByName(host), port))
                 serverSocket = ss
-                Log.i(TAG, "HTTP server listening on 127.0.0.1:$port")
+                if (bindAll) {
+                    // Log the dialable address so an operator running
+                    // `adb logcat -s SimuseHttpServer` (or reading it
+                    // once over USB during bootstrap) can point the farm
+                    // at this device without a second tool.
+                    val lanIp = NetworkAddresses.lanIpv4()
+                    Log.i(
+                        TAG,
+                        "HTTP server listening on $host:$port (LAN mode) " +
+                            "reachable at http://${lanIp ?: "<no-lan-ipv4>"}:$port",
+                    )
+                } else {
+                    Log.i(TAG, "HTTP server listening on $host:$port")
+                }
                 while (running.get()) {
                     try {
                         val socket = ss.accept()
@@ -304,6 +333,12 @@ class HttpServer(
         private const val SOCKET_TIMEOUT_MS = 8_000
         private const val HANDLER_POOL_SIZE = 4
         private const val SHUTDOWN_GRACE_MS = 2_000L
+
+        // Bind hosts. IPv4 literals on purpose: `0.0.0.0` (rather than
+        // `::`) keeps the listener on the v4 stack the farm dials, and
+        // avoids the dual-stack `::ffff:` address shapes in logs.
+        internal const val BIND_LOOPBACK_HOST = "127.0.0.1"
+        internal const val BIND_ALL_HOST = "0.0.0.0"
 
         // 8 KiB is generous for a real HTTP request line + header
         // set (typical sim-use bridge requests fit in <1 KiB).
