@@ -7,6 +7,14 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!--
+      Fork addition: required by WifiManager.createWifiLock(), which the
+      keep-alive service holds only while "bind all interfaces" (Wi-Fi
+      mode) is enabled, so the radio does not power-save the bridge's
+      listening socket into unreachability with the screen off. This is
+      a normal (non-dangerous) permission — no runtime prompt.
+    -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
 
     <application
         android:label="@string/app_name"
@@ -34,7 +42,7 @@
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Keeps the sim-use bridge accessibility service alive to prevent vendor process-kill." />
+                android:value="Keeps the sim-use bridge accessibility service alive to prevent vendor process-kill, and holds wake/Wi-Fi locks so the local control API stays reachable with the screen off." />
         </service>
 
         <!--
