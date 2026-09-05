@@ -11,10 +11,12 @@ android {
         applicationId = "com.linecorp.simuse.devicebridge"
         minSdk = 30
         targetSdk = 35
-        // Bumped for the Wi-Fi bind mode (see FARM-NOTES.md). `versionName`
-        // deliberately still tracks the CLI release version — the Swift side
-        // reports it as `bridge_version` and the release script owns it.
-        versionCode = 22
+        // Bumped for the Wi-Fi bind mode (see FARM-NOTES.md), then again
+        // for the LAN-hardening pass (request deadline, bounded connection
+        // queue, lock/rebind symmetry). `versionName` deliberately still
+        // tracks the CLI release version — the Swift side reports it as
+        // `bridge_version` and the release script owns it.
+        versionCode = 23
         versionName = "0.14.0"
 
         // Must match `BridgeClient.expectedProtocolVersion` on the
