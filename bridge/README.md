@@ -147,13 +147,66 @@ falling back to `WIFI_MODE_FULL_HIGH_PERF` below API 29), so Doze and
 Wi-Fi power-save do not stall the listening socket on a screen-off,
 cable-free device. This costs battery, so the locks are taken *only* in
 Wi-Fi mode — USB deployments keep upstream behaviour untouched. The new
-`ACCESS_WIFI_STATE` permission is normal, not dangerous: no runtime
-prompt.
+`ACCESS_WIFI_STATE` and `ACCESS_NETWORK_STATE` permissions are normal,
+not dangerous: no runtime prompt.
+
+The locks are re-synced on **every** listener start, including the
+restart a `set_bind_all` toggle triggers, so turning Wi-Fi mode off
+releases them immediately rather than leaving a wake lock held for the
+life of the process.
+
+In Wi-Fi mode the service also registers a default-network callback and
+logs any change to the device's LAN IPv4:
+
+```
+adb logcat -s SimuseKeepAlive:W
+# LAN address changed (available): 192.168.1.42 -> 192.168.1.57 — the
+# farm's bridgeUrl for this device is now stale unless it has a DHCP
+# reservation
+```
+
+Nothing announces the new address to the farm; the log is a breadcrumb
+for whoever plugs a cable in afterwards. Give every device a DHCP
+reservation.
+
+### Limits on a LAN-exposed listener
+
+Wi-Fi mode puts the listener in reach of anything on the subnet, so the
+HTTP layer enforces:
+
+| Limit | Value | Response |
+| --- | --- | --- |
+| Request header bytes | 8 KiB | `413 headers_too_large` |
+| Request body bytes (`Content-Length`) | 4 MiB | `413 body_too_large` |
+| Whole-request read time | 10 s | `408 request_timeout` |
+| Single socket read | 8 s (`soTimeout`) | connection dropped |
+| Queued connections awaiting a handler | 32 (4 handlers) | `503 server_busy` |
+
+The read deadline is what stops a slow-loris client: `soTimeout` alone
+bounds one `read()`, so a peer dribbling a byte every 7 s could otherwise
+hold one of the four handler threads for hours.
+
+Framing is deliberately strict, because a silent misparse is worse than
+a loud rejection: `Transfer-Encoding: chunked` is refused with `411`
+(send a `Content-Length`), a body shorter than its `Content-Length` is
+`400 truncated_body`, and an unparseable `Content-Length` is
+`400 bad_content_length`. Every response carries `Connection: close`;
+keep-alive is not implemented.
+
+**Form encoding gotcha.** `POST` bodies are
+`application/x-www-form-urlencoded`, where `+` means a space. Standard
+Base64 uses `+` in its alphabet, so `base64_text` **must** be
+percent-encoded (`%2B`) — sending a raw Base64 blob yields
+`400 invalid_base64` when the `+` arrives as a space.
 
 ### Security notes
 
 * **The bearer token is still mandatory** on every route except `/ping`.
-  Wi-Fi mode changes *where* the socket listens, nothing about auth.
+  Wi-Fi mode changes *where* the socket listens, nothing about auth. The
+  check runs before dispatch and keys on path only, so unknown routes and
+  non-GET verbs (`HEAD`, `OPTIONS`, …) answer `401`, not `404` — an
+  unauthenticated peer cannot even enumerate which endpoints exist.
+  Comparison is constant-time (`MessageDigest.isEqual`).
 * The token is the only credential, and traffic is **plain HTTP** — no
   TLS. Treat the bridge as trusted-network-only: put the farm on a
   dedicated Wi-Fi SSID or VLAN with no route to the internet and no
@@ -173,6 +226,11 @@ prompt.
   same SharedPreferences file), `adb shell pm clear
   com.linecorp.simuse.devicebridge` — which restores stock upstream
   behaviour wholesale.
+
+  `set_bind_all false` rebinds to `127.0.0.1` synchronously before the
+  call returns, so no *new* LAN connection can be established afterwards.
+  A request already in flight finishes; since every response closes its
+  connection, that is at most one per peer.
 
 ## Test
 

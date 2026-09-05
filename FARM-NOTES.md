@@ -27,9 +27,9 @@ Branch: `feat/bridge-wifi-bind`.
 | `server/ActionRouter.kt` | `/ping` gained a `bind_all` boolean alongside the existing `protocol_version` / `bridge_version`. Still unauthenticated, still carries no auth material. Auth on all other routes is unchanged. |
 | `service/SimuseAccessibilityService.kt` | Reads the flag when starting the listener; new `restartServer()` so a toggle applies immediately; exposes the live bind mode for `/ping`. |
 | `service/SimuseContentProvider.kt` | New `call()` methods `set_bind_all` / `get_bind_all` / `status`, and a `bridge_status` query path. All behind the existing shell/root UID guard. |
-| `service/BridgeKeepAliveService.kt` | Holds a `PARTIAL_WAKE_LOCK` and a Wi-Fi lock (`WIFI_MODE_FULL_LOW_LATENCY`, `WIFI_MODE_FULL_HIGH_PERF` below API 29) **only while LAN mode is on**. |
-| `AndroidManifest.xml` | Added `ACCESS_WIFI_STATE` (normal permission, no runtime prompt). |
-| Tests | `BridgeSettingsTest` (new, 8 cases) plus additions to `ActionRouterTest`, `BridgePureLogicTest`, `SimuseContentProviderTest`. 66 JVM tests total, no emulator required. |
+| `service/BridgeKeepAliveService.kt` | Holds a `PARTIAL_WAKE_LOCK` and a Wi-Fi lock (`WIFI_MODE_FULL_LOW_LATENCY`, `WIFI_MODE_FULL_HIGH_PERF` below API 29) **only while LAN mode is on**, and logs LAN IPv4 changes. |
+| `AndroidManifest.xml` | Added `ACCESS_WIFI_STATE` and `ACCESS_NETWORK_STATE` (both normal permissions, no runtime prompt). |
+| Tests | `BridgeSettingsTest` (new) plus additions to `ActionRouterTest`, `BridgePureLogicTest`, `HttpServerParseRequestTest`, `SimuseContentProviderTest`. 82 JVM tests total, no emulator required. |
 
 **Default behaviour is unchanged.** A device that never runs
 `set_bind_all` behaves exactly like upstream: loopback bind, no wake
@@ -137,7 +137,50 @@ clears app data.
 **Give every device a DHCP reservation or a static lease.** Nothing in
 the bridge announces an address change; if a phone's IP moves, its
 `bridgeUrl` goes stale and the farm sees connection refusals until
-someone re-reads `status` over USB.
+someone re-reads `status` over USB. In Wi-Fi mode the bridge does at
+least record the change in logcat, so a device that went dark can be
+diagnosed after the fact:
+
+```bash
+adb logcat -s SimuseKeepAlive:W
+# LAN address changed (available): 192.168.1.42 -> 192.168.1.57 — ...
+```
+
+## Request limits the farm has to live with
+
+Wi-Fi mode exposes the listener to the whole subnet, so the HTTP layer
+caps what one peer can consume. These are the values a farm controller
+can hit in normal operation:
+
+| Limit | Value | Response |
+| --- | --- | --- |
+| Request headers | 8 KiB | `413 headers_too_large` |
+| Request body (`Content-Length`) | 4 MiB | `413 body_too_large` |
+| Whole-request read time | 10 s | `408 request_timeout` |
+| Concurrent handlers | 4 | — |
+| Queued connections | 32 | `503 server_busy` |
+
+Practical consequences for the controller:
+
+* **Back off on `503 server_busy`.** It means 4 requests are in flight
+  and 32 more are queued against this phone. A screenshot poller that
+  never waits for its previous response will get there. One controller
+  driving one phone should keep at most a couple of requests in flight.
+* **`408` means the request itself was slow to arrive**, not that the
+  device was slow to act — usually a congested or flapping Wi-Fi link.
+* **Every response closes its connection** (`Connection: close`).
+  Keep-alive is not implemented, so use a client that tolerates that
+  rather than one that pipelines.
+* **Percent-encode `base64_text`.** Bodies are
+  `application/x-www-form-urlencoded`, where `+` decodes to a space, and
+  standard Base64 contains `+`. A raw blob comes back as
+  `400 invalid_base64`. Send `%2B`.
+* **Send `Content-Length`, never `Transfer-Encoding: chunked`** — the
+  bridge refuses chunked with `411` rather than misparsing it.
+
+Unauthenticated peers get `401` on everything except `GET /ping`,
+including unknown paths and `HEAD`/`OPTIONS`, so a scan of the subnet
+learns nothing about which endpoints exist.
 
 ## Security posture — read before deploying
 
@@ -158,6 +201,14 @@ someone re-reads `status` over USB.
 * To take a device back off the network:
   `adb shell content call --uri content://com.linecorp.simuse.devicebridge --method set_bind_all --arg false`
 
+  The rebind to `127.0.0.1` happens synchronously before the call
+  returns, so no new LAN connection can be made afterwards. One in-flight
+  request per peer may still complete. The same call releases the wake
+  and Wi-Fi locks.
+* `status` output is safe to paste into a ticket: it carries the bind
+  mode, port and IP, and no auth material. The token has exactly one
+  exit, the `auth_token` query.
+
 ## Building
 
 ```bash
@@ -166,7 +217,7 @@ export JAVA_HOME=/Library/Java/JavaVirtualMachines/openjdk-21.jdk/Contents/Home
 export ANDROID_HOME="$HOME/Library/Android/sdk"
 echo "sdk.dir=$ANDROID_HOME" > local.properties   # gitignored
 ./gradlew :app:assembleDebug        # → app/build/outputs/apk/debug/app-debug.apk
-./gradlew :app:testDebugUnitTest    # 66 JVM tests, no emulator
+./gradlew :app:testDebugUnitTest    # 82 JVM tests, no emulator
 ```
 
 JDK 17–21 only; the bundled Gradle 8.7 rejects JDK 22+. For the
