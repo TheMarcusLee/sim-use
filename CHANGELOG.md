@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Bridge Wi-Fi mode: the on-device HTTP listener can now bind `0.0.0.0` instead of `127.0.0.1`, so a phone farm can reach a device over the LAN with no USB cable attached. Off by default — upstream `adb forward` deployments are unchanged. Toggle it from `adb shell content call --uri content://com.linecorp.simuse.devicebridge --method set_bind_all --arg true|false` (shell/root UID only, like the existing token mint); `--method status` (or the `bridge_status` query path) reports the persisted flag, the live bind mode, the port and the device's LAN IPv4, which is also logged at listener start. Bearer auth stays mandatory on every route except `/ping`, and `/ping` gained an additive `bind_all` boolean — no `PROTOCOL_VERSION` bump — so a controller can health-check reachability without the token. While Wi-Fi mode is on, `BridgeKeepAliveService` also holds a `PARTIAL_WAKE_LOCK` and a Wi-Fi lock (`WIFI_MODE_FULL_LOW_LATENCY`, `WIFI_MODE_FULL_HIGH_PERF` below API 29) so Doze and radio power-save do not stall the socket on a screen-off device; this costs battery and is skipped entirely in the default loopback mode. Adds the normal (non-prompting) `ACCESS_WIFI_STATE` permission. See `bridge/README.md` → "Wi-Fi mode" and `FARM-NOTES.md`.
+
 ## [0.14.0] - 2026-08-27
 
 ### Added
