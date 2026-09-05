@@ -4,6 +4,7 @@ package com.linecorp.simuse.devicebridge
 import com.linecorp.simuse.devicebridge.handler.InputHandler
 import com.linecorp.simuse.devicebridge.server.ActionRouter
 import com.linecorp.simuse.devicebridge.server.HttpServer
+import com.linecorp.simuse.devicebridge.util.NetworkAddresses
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -177,5 +178,66 @@ class BridgePureLogicTest {
         assertEquals("error", obj.getString("status"))
         assertEquals("unauthorized", obj.getString("code"))
         assertNull(obj.opt("error"))
+    }
+
+    // ── Bind hosts (fork addition) ─────────────────────────────
+
+    @Test
+    fun bindHostsAreIpv4Literals() {
+        // IPv4 literals rather than "localhost" / "::" so we never
+        // depend on the device resolver and never land on a dual-stack
+        // v6 socket the farm cannot dial.
+        assertEquals("127.0.0.1", HttpServer.BIND_LOOPBACK_HOST)
+        assertEquals("0.0.0.0", HttpServer.BIND_ALL_HOST)
+    }
+
+    // ── LAN address selection (fork addition) ──────────────────
+
+    private fun candidate(name: String, addr: String) = NetworkAddresses.Candidate(name, addr)
+
+    @Test
+    fun prefersWifiOverEverythingElse() {
+        val picked = NetworkAddresses.selectPreferred(
+            listOf(
+                candidate("dummy0", "10.9.9.9"),
+                candidate("wlan0", "192.168.1.42"),
+            )
+        )
+        assertEquals("192.168.1.42", picked)
+    }
+
+    @Test
+    fun prefersWiredOverUnknownInterfaces() {
+        val picked = NetworkAddresses.selectPreferred(
+            listOf(
+                candidate("zt0", "10.147.0.5"),
+                candidate("eth0", "192.168.1.7"),
+            )
+        )
+        assertEquals("192.168.1.7", picked)
+    }
+
+    @Test
+    fun skipsCellularInterfaces() {
+        // A carrier-assigned rmnet address is not reachable from the
+        // farm controller; surfacing it would send operators chasing a
+        // dead endpoint.
+        assertNull(
+            NetworkAddresses.selectPreferred(listOf(candidate("rmnet_data0", "10.60.1.2")))
+        )
+        assertEquals(
+            "192.168.1.42",
+            NetworkAddresses.selectPreferred(
+                listOf(
+                    candidate("rmnet_data0", "10.60.1.2"),
+                    candidate("wlan0", "192.168.1.42"),
+                )
+            )
+        )
+    }
+
+    @Test
+    fun returnsNullWhenNoCandidates() {
+        assertNull(NetworkAddresses.selectPreferred(emptyList()))
     }
 }

@@ -8,6 +8,7 @@ import io.mockk.every
 import io.mockk.mockk
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -55,6 +56,91 @@ class ActionRouterTest {
         // clients can verify compatibility without an authed call.
         assertTrue("protocol_version field present", json.has("protocol_version"))
         assertTrue("bridge_version field present", json.has("bridge_version"))
+    }
+
+    // ── /ping bind-all reporting (fork addition) ────────────────
+
+    @Test
+    fun pingReportsLoopbackByDefault() {
+        // Routers built without an explicit provider — every upstream
+        // call site and every older test — must report loopback.
+        val json = JSONObject(router.route("GET", "/ping", emptyMap(), unauthed()).body)
+        assertFalse("bind_all defaults to false", json.getBoolean("bind_all"))
+    }
+
+    @Test
+    fun pingReportsBindAllWhenListenerIsOnAllInterfaces() {
+        val lanRouter = ActionRouter(
+            serviceProvider = { null },
+            authManager = authManager,
+            bindAllProvider = { true },
+        )
+        val json = JSONObject(lanRouter.route("GET", "/ping", emptyMap(), unauthed()).body)
+        assertTrue(json.getBoolean("bind_all"))
+        // Still the same envelope, still unauthenticated: a farm health
+        // check must not need the token.
+        assertEquals("success", json.getString("status"))
+        assertEquals("pong", json.getString("result"))
+    }
+
+    @Test
+    fun pingTracksTheProviderLive() {
+        // The service snapshots its bind mode at listener start and the
+        // router reads it through the lambda, so a restart into a new
+        // mode must be visible on the very next /ping.
+        var bindAll = false
+        val liveRouter = ActionRouter(
+            serviceProvider = { null },
+            authManager = authManager,
+            bindAllProvider = { bindAll },
+        )
+        assertFalse(JSONObject(liveRouter.route("GET", "/ping", emptyMap(), unauthed()).body).getBoolean("bind_all"))
+        bindAll = true
+        assertTrue(JSONObject(liveRouter.route("GET", "/ping", emptyMap(), unauthed()).body).getBoolean("bind_all"))
+    }
+
+    @Test
+    fun pingNeverLeaksTheBearerToken() {
+        // /ping is the one unauthenticated route and, in Wi-Fi mode, is
+        // answered to any LAN peer. Pin that the payload carries no auth
+        // material.
+        val lanRouter = ActionRouter(
+            serviceProvider = { null },
+            authManager = authManager,
+            bindAllProvider = { true },
+        )
+        val body = lanRouter.route("GET", "/ping", emptyMap(), unauthed()).body
+        assertFalse("token must not appear in /ping body", body.contains(token))
+        val json = JSONObject(body)
+        for (forbidden in listOf("token", "auth_token", "authorization", "bearer")) {
+            assertFalse("/ping must not carry '$forbidden'", json.has(forbidden))
+        }
+    }
+
+    @Test
+    fun bindAllModeStillRequiresAuthOnEveryOtherRoute() {
+        // The whole security story of Wi-Fi mode is "the token is still
+        // mandatory". Enumerate the farm-facing routes explicitly.
+        val lanRouter = ActionRouter(
+            serviceProvider = { null },
+            authManager = authManager,
+            bindAllProvider = { true },
+        )
+        val routes = listOf(
+            "GET" to "/screenshot",
+            "GET" to "/a11y_tree_full",
+            "GET" to "/keyboard/state",
+            "POST" to "/tap",
+            "POST" to "/swipe",
+            "POST" to "/gesture",
+            "POST" to "/keyboard/input",
+            "POST" to "/keyboard/key",
+            "POST" to "/paste",
+        )
+        for ((method, path) in routes) {
+            val resp = lanRouter.route(method, path, emptyMap(), unauthed())
+            assertEquals("$method $path must be 401 without a bearer", 401, resp.statusCode)
+        }
     }
 
     // ── Auth gate ───────────────────────────────────────────────

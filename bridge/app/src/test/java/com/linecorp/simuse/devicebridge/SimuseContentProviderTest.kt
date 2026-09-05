@@ -55,6 +55,21 @@ class SimuseContentProviderTest {
     }
 
     @Test(expected = SecurityException::class)
+    fun callRejectsArbitraryAppUid() {
+        // `set_bind_all` puts the bridge on the LAN. If an installed app
+        // could reach it, a malicious app could expose the control API
+        // to the whole network without the operator noticing.
+        every { Binder.getCallingUid() } returns 10191
+        SimuseContentProvider().call(SimuseContentProvider.METHOD_SET_BIND_ALL, "true", null)
+    }
+
+    @Test(expected = SecurityException::class)
+    fun callRejectsSystemUid() {
+        every { Binder.getCallingUid() } returns 1000
+        SimuseContentProvider().call(SimuseContentProvider.METHOD_STATUS, null, null)
+    }
+
+    @Test(expected = SecurityException::class)
     fun queryRejectsSystemUid() {
         // System UID (1000) is privileged but is NOT shell. We want a hard
         // shell-only contract; system_server has no business reading our
