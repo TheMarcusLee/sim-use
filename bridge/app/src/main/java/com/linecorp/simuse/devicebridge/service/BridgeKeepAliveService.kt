@@ -7,12 +7,16 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
 import com.linecorp.simuse.devicebridge.config.BridgeSettings
+import com.linecorp.simuse.devicebridge.util.NetworkAddresses
 
 /**
  * Foreground service that keeps the bridge process alive.
@@ -41,11 +45,17 @@ import com.linecorp.simuse.devicebridge.config.BridgeSettings
  *
  * Both are skipped in the default loopback mode, so upstream USB
  * deployments keep exactly their current battery behaviour.
+ *
+ * LAN mode additionally registers a default-network callback that logs
+ * the device's LAN IPv4 whenever it changes — see
+ * [registerAddressWatcher].
  */
 class BridgeKeepAliveService : Service() {
 
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+    private var lastLoggedIpv4: String? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -58,13 +68,21 @@ class BridgeKeepAliveService : Service() {
             buildNotification(),
             ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
         )
-        // Re-read on every start command: `restartServer()` after a
-        // `set_bind_all` toggle re-issues `startForegroundService`, so
-        // the locks follow the current mode without a reboot.
+        // Re-read on every start command:
+        // `SimuseAccessibilityService.startServer()` re-issues
+        // `startForegroundService` on every listener start — including
+        // the `restartServer()` that a `set_bind_all` toggle triggers —
+        // so the locks follow the current mode without a reboot.
+        //
+        // `intent` is null when the OS restarts us under START_STICKY;
+        // re-reading the persisted flag (rather than trusting an extra)
+        // is what makes that path correct too.
         if (BridgeSettings(this).bindAllInterfaces) {
             acquireLanLocks()
+            registerAddressWatcher()
         } else {
             releaseLanLocks()
+            unregisterAddressWatcher()
         }
         Log.i(TAG, "Keep-alive foreground service started")
         return START_STICKY
@@ -110,6 +128,61 @@ class BridgeKeepAliveService : Service() {
         }
     }
 
+    /**
+     * Logs the device's LAN IPv4 whenever the network underneath the
+     * bridge changes.
+     *
+     * Nothing in the bridge advertises its address, so a phone whose
+     * DHCP lease moves silently drops off the farm — the controller
+     * just starts seeing connection refusals against a stale
+     * `bridgeUrl`. We cannot fix that from the device side, but we can
+     * leave a timestamped breadcrumb in logcat so the operator who
+     * eventually plugs a cable in can see exactly when and to what the
+     * address changed. Only registered in LAN mode; loopback
+     * deployments keep upstream's behaviour of touching no networking
+     * APIs at all.
+     */
+    private fun registerAddressWatcher() {
+        if (networkCallback != null) return
+        val cm = getSystemService(ConnectivityManager::class.java) ?: return
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) = report("available")
+            override fun onLost(network: Network) = report("lost")
+            override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) =
+                report("capabilities-changed")
+
+            private fun report(reason: String) {
+                val current = NetworkAddresses.lanIpv4()
+                if (current == lastLoggedIpv4) return
+                Log.w(
+                    TAG,
+                    "LAN address changed ($reason): ${lastLoggedIpv4 ?: "<none>"} -> " +
+                        "${current ?: "<none>"} — the farm's bridgeUrl for this device " +
+                        "is now stale unless it has a DHCP reservation",
+                )
+                lastLoggedIpv4 = current
+            }
+        }
+        try {
+            cm.registerDefaultNetworkCallback(callback)
+            networkCallback = callback
+            lastLoggedIpv4 = NetworkAddresses.lanIpv4()
+            Log.i(TAG, "Watching for LAN address changes (current=${lastLoggedIpv4 ?: "<none>"})")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to register network callback: ${e.message}")
+        }
+    }
+
+    private fun unregisterAddressWatcher() {
+        val callback = networkCallback ?: return
+        networkCallback = null
+        try {
+            getSystemService(ConnectivityManager::class.java)?.unregisterNetworkCallback(callback)
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to unregister network callback: ${e.message}")
+        }
+    }
+
     private fun releaseLanLocks() {
         try {
             wakeLock?.takeIf { it.isHeld }?.release()
@@ -122,6 +195,7 @@ class BridgeKeepAliveService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        unregisterAddressWatcher()
         releaseLanLocks()
         Log.i(TAG, "Keep-alive foreground service destroyed")
         super.onDestroy()

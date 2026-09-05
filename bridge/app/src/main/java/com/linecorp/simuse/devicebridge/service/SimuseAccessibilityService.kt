@@ -40,8 +40,9 @@ class SimuseAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
+        // `startServer()` starts the keep-alive service itself, so the
+        // locks always match the mode the listener actually came up in.
         startServer()
-        startKeepAliveService()
         Log.i(TAG, "onServiceConnected (pid=${android.os.Process.myPid()})")
     }
 
@@ -77,6 +78,7 @@ class SimuseAccessibilityService : AccessibilityService() {
         // preference change must go through `restartServer()` (which the
         // ContentProvider calls) rather than being re-read per request.
         val bindAll = settings.bindAllInterfaces
+        // Provisional: corrected below once we know the bind succeeded.
         boundAllInterfaces = bindAll
         val newRouter = ActionRouter(
             serviceProvider = { instance },
@@ -84,8 +86,26 @@ class SimuseAccessibilityService : AccessibilityService() {
             bindAllProvider = { boundAllInterfaces },
         )
         router = newRouter
-        httpServer = HttpServer(SERVER_PORT, newRouter, bindAll = bindAll).also { it.start() }
-        if (bindAll) {
+        val server = HttpServer(SERVER_PORT, newRouter, bindAll = bindAll).also { it.start() }
+        httpServer = server
+        // `start()` binds synchronously, so a false `isRunning` here
+        // means the bind failed (port held, permission). Report that on
+        // `/ping` rather than claiming LAN reachability the farm will
+        // then fail to use.
+        boundAllInterfaces = bindAll && server.isRunning
+        if (!server.isRunning) {
+            Log.e(TAG, "HTTP server failed to bind port $SERVER_PORT (bindAll=$bindAll)")
+        }
+        // Re-issue the keep-alive start command on every listener start,
+        // not just on `onServiceConnected`. `restartServer()` (the
+        // `set_bind_all` path) goes through here, and the keep-alive
+        // service re-reads the flag in `onStartCommand` — without this
+        // call, toggling LAN mode ON never acquires the wake/Wi-Fi locks
+        // on an already-connected service (the farm's normal bootstrap
+        // order), and toggling it OFF leaves a PARTIAL_WAKE_LOCK held
+        // for the life of the process.
+        startKeepAliveService()
+        if (boundAllInterfaces) {
             Log.i(
                 TAG,
                 "HTTP server started on 0.0.0.0:$SERVER_PORT — point the farm at " +
@@ -111,6 +131,7 @@ class SimuseAccessibilityService : AccessibilityService() {
     fun stopServer() {
         httpServer?.stop()
         httpServer = null
+        boundAllInterfaces = false
         // Shut down the router's `rootWindowExecutor` (cached
         // thread pool) so service-unbind doesn't leave a forest
         // of "AwaitedTreeWorker" threads against a dead service

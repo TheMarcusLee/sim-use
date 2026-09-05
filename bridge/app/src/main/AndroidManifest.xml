@@ -15,6 +15,13 @@
       a normal (non-dangerous) permission — no runtime prompt.
     -->
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <!--
+      Fork addition: lets the keep-alive service register a default-network
+      callback while in Wi-Fi mode, so a DHCP address change is written to
+      logcat instead of the device silently going dark on the farm. Normal
+      permission — no runtime prompt.
+    -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
     <application
         android:label="@string/app_name"
