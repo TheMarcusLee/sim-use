@@ -58,6 +58,20 @@ bridge/
                 └── SimuseContentProvider.kt       # adb-shell-gated bootstrap
 ```
 
+## Sampled paths on `/gesture` (fork addition)
+
+`POST /gesture` accepts, besides the original `strokes` list, a single sampled path:
+
+```
+points=[{"x":540,"y":1800,"t":0},{"x":533,"y":1400,"t":92},...,{"x":521,"y":700,"t":301}]
+```
+
+`t` is milliseconds since touch-down (optional, defaulting to 0, so a bare polyline works). The
+path is dispatched as one `StrokeDescription` along an Android `Path` lasting from the first
+timestamp to the last, clamped like a swipe. This is what the phone farm sends for a human thumb
+arc. `StrokeDescription` walks a path at constant speed, so the shape and the total duration are
+exact while the caller's within-stroke velocity profile is flattened. `/swipe` is unchanged.
+
 ## Wi-Fi mode (fork addition)
 
 By default the HTTP listener binds `127.0.0.1` only, exactly as upstream:
