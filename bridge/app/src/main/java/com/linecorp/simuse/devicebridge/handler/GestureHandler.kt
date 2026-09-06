@@ -46,6 +46,34 @@ class GestureHandler {
             "swipe($startX,$startY -> $endX,$endY)")
     }
 
+    /**
+     * Play a sampled path: one stroke along the polyline the caller
+     * sent, lasting from its first timestamp to its last.
+     *
+     * This is what the farm's motion model dispatches — a thumb's arc
+     * with jittered start, slight bow and a dozen-odd samples. The
+     * curve reaches the screen exactly as drawn; the *timing within*
+     * the stroke does not, because `StrokeDescription` walks a path at
+     * a constant speed. Total duration and shape are honoured, the
+     * fast-middle velocity profile is flattened. Splitting the path
+     * into one continued stroke per segment would preserve it, but
+     * `dispatchGesture` caps a gesture at
+     * `GestureDescription.getMaxStrokeCount()` strokes and continued
+     * strokes have to be dispatched one gesture at a time against a
+     * callback, which this fire-and-forget handler deliberately is not.
+     */
+    fun path(service: AccessibilityService, points: List<TimedPoint>): Boolean {
+        if (points.size < 2) return false
+        val stroke = Path().apply {
+            moveTo(points.first().x, points.first().y)
+            for (i in 1 until points.size) lineTo(points[i].x, points[i].y)
+        }
+        val duration = pathDuration(points)
+        val description = GestureDescription.StrokeDescription(stroke, 0, duration)
+        return dispatch(service, GestureDescription.Builder().addStroke(description).build(),
+            "path(${points.size} points, ${duration}ms)")
+    }
+
     fun gesture(service: AccessibilityService, strokes: List<StrokeParams>): Boolean {
         val builder = GestureDescription.Builder()
         for (s in strokes) {
@@ -101,6 +129,9 @@ class GestureHandler {
 
     data class Point(val x: Float, val y: Float)
 
+    /** A path sample: where the finger is, and how long after touch-down. */
+    data class TimedPoint(val x: Float, val y: Float, val t: Long)
+
     companion object {
         private const val TAG = "SimuseGesture"
         private const val TAP_DURATION = 50L
@@ -115,5 +146,14 @@ class GestureHandler {
 
         internal fun clampSwipeDuration(duration: Long): Long =
             duration.coerceIn(MIN_SWIPE_DURATION, MAX_SWIPE_DURATION)
+
+        /**
+         * A sampled path lasts from its first timestamp to its last.
+         * Clamped like a swipe: the same runaway-request bound applies,
+         * and a path whose timestamps arrived scrambled still gets a
+         * dispatchable duration rather than a rejected gesture.
+         */
+        internal fun pathDuration(points: List<TimedPoint>): Long =
+            clampSwipeDuration(points.last().t - points.first().t)
     }
 }

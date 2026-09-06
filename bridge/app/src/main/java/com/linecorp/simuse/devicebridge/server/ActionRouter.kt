@@ -344,8 +344,21 @@ class ActionRouter(
         return if (ok) HttpResponse(200, successJson()) else HttpResponse(500, errorJson("swipe_failed"))
     }
 
+    /**
+     * Two shapes share this route. `points` is a single sampled path —
+     * `[{"x":..,"y":..,"t":..}, ...]`, milliseconds since touch-down —
+     * which is what the farm's motion model sends for a human swipe.
+     * `strokes` is the original multi-stroke form (rotate presets, and
+     * anything needing several fingers). `/swipe` is untouched.
+     */
     private fun handleGesture(params: Map<String, String>): HttpResponse {
         val service = requireService() ?: return serviceUnavailable()
+        params["points"]?.let { pointsJson ->
+            val points = parseTimedPoints(pointsJson)
+            if (points.size < 2) return badRequest("invalid_points")
+            val ok = gestureHandler.path(service, points)
+            return if (ok) HttpResponse(200, successJson()) else HttpResponse(500, errorJson("gesture_failed"))
+        }
         val strokesJson = params["strokes"] ?: return badRequest("missing_strokes")
         val strokes = parseStrokes(strokesJson)
         if (strokes.isEmpty()) return badRequest("invalid_strokes")
@@ -628,6 +641,27 @@ class ActionRouter(
 
         /** Safety bound on the secondary-window parent walk. */
         private const val MAX_PARENT_DEPTH = 8
+
+        /**
+         * `[{"x":1,"y":2,"t":0}, ...]` → timed points, or an empty
+         * list when the body is not that. `t` is optional and defaults
+         * to 0 so a caller can send a bare polyline; anything without
+         * both coordinates is not a path and is rejected whole rather
+         * than silently played with a hole in it.
+         */
+        internal fun parseTimedPoints(json: String): List<GestureHandler.TimedPoint> = try {
+            val array = JSONArray(json)
+            (0 until array.length()).map { index ->
+                val point = array.getJSONObject(index)
+                GestureHandler.TimedPoint(
+                    x = point.getDouble("x").toFloat(),
+                    y = point.getDouble("y").toFloat(),
+                    t = point.optLong("t", 0L),
+                )
+            }
+        } catch (e: Exception) {
+            emptyList()
+        }
 
         /** `{status: success}` or `{status: success, result: <inline JSON>}`. */
         fun successJson(result: Any? = null): String =
